@@ -201,24 +201,56 @@ func (c *Client) doLogin(req loginRequest) (loginResponse, error) {
 }
 
 func (c *Client) storeToken(accessToken, refreshToken string) error {
-	claims, err := parseJWTClaims(accessToken)
-	if err != nil {
-		return fmt.Errorf("parsing access token: %w", err)
-	}
-	if claims.Username == "" {
-		return fmt.Errorf("access token missing username claim")
-	}
-
+	// Set the token first so the Bearer header is available for the preference
+	// API fallback below.
 	c.mu.Lock()
 	c.sess.AccessToken = accessToken
 	c.sess.RefreshToken = refreshToken
-	c.sess.MQTTUsername = claims.Username
+	c.mu.Unlock()
+
+	username, err := c.resolveMQTTUsername(accessToken)
+	if err != nil {
+		return fmt.Errorf("resolving MQTT username: %w", err)
+	}
+
+	c.mu.Lock()
+	c.sess.MQTTUsername = username
 	c.authed = true
 	c.tfaKey = ""
 	c.mu.Unlock()
 
-	logger.Info("Bambu cloud authenticated", "user", claims.Username)
+	logger.Info("Bambu cloud authenticated", "user", username)
 	return nil
+}
+
+// resolveMQTTUsername derives the "u_<uid>" MQTT username from the access token.
+// Older Bambu tokens are JWTs carrying a "username" claim; some accounts now get
+// opaque tokens, so fall back to the preference API (matching pybambu).
+func (c *Client) resolveMQTTUsername(accessToken string) (string, error) {
+	if claims, err := parseJWTClaims(accessToken); err == nil && claims.Username != "" {
+		return claims.Username, nil
+	}
+	uid, err := c.fetchUID()
+	if err != nil {
+		return "", fmt.Errorf("token is not a JWT and preference lookup failed: %w", err)
+	}
+	if uid == "" {
+		return "", fmt.Errorf("preference API returned no uid")
+	}
+	return "u_" + uid, nil
+}
+
+type preferenceResponse struct {
+	UID json.Number `json:"uid"`
+}
+
+// fetchUID reads the numeric account uid from the preference API.
+func (c *Client) fetchUID() (string, error) {
+	var resp preferenceResponse
+	if err := c.getJSON("/v1/design-user-service/my/preference", &resp); err != nil {
+		return "", err
+	}
+	return resp.UID.String(), nil
 }
 
 // --- device discovery ---
@@ -252,16 +284,17 @@ func (c *Client) LoadSession() bool {
 		return false
 	}
 	var s session
-	if err := json.Unmarshal(data, &s); err != nil || s.AccessToken == "" {
+	if err := json.Unmarshal(data, &s); err != nil || s.AccessToken == "" || s.MQTTUsername == "" {
 		return false
 	}
-	claims, err := parseJWTClaims(s.AccessToken)
-	if err != nil {
-		return false
-	}
-	if claims.Exp > 0 && time.Now().After(time.Unix(claims.Exp, 0)) {
-		logger.Info("Persisted Bambu session expired, re-authenticating")
-		return false
+	// JWT tokens carry an expiry we can check up front; opaque tokens cannot be
+	// validated offline, so accept them and rely on a runtime failure (and the
+	// liveness probe) to trigger re-authentication.
+	if claims, err := parseJWTClaims(s.AccessToken); err == nil {
+		if claims.Exp > 0 && time.Now().After(time.Unix(claims.Exp, 0)) {
+			logger.Info("Persisted Bambu session expired, re-authenticating")
+			return false
+		}
 	}
 
 	c.mu.Lock()
