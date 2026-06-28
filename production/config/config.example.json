@@ -1,0 +1,20 @@
+{
+  "mqtt": {
+    "url": "tcp://localhost:1883",
+    "topic": "home/bambu",
+    "qos": 2,
+    "retain": true
+  },
+  "bambu": {
+    "region": "global",
+    "email": "${BAMBU_EMAIL}",
+    "password": "${BAMBU_PASSWORD}",
+    "pushall_interval": 300,
+    "session_file": "/var/lib/mqtt-bambu/.session/session.json"
+  },
+  "web": {
+    "enabled": true,
+    "port": 8080
+  },
+  "loglevel": "info"
+}
