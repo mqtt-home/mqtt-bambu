@@ -24,8 +24,9 @@ type SSEClient struct {
 	Channel chan string
 }
 
-// WebServer serves the status UI and auth flow. The manager is nil until the
-// bridge has authenticated and started.
+// WebServer serves the status UI and auth flow. The manager exists from
+// startup and gains printers as they are registered (LAN immediately, cloud
+// once the account has authenticated).
 type WebServer struct {
 	cloud   *bambu.Client
 	manager *bambu.Manager
@@ -40,20 +41,16 @@ type WebServer struct {
 	unhealthyMu    sync.Mutex
 }
 
-func NewWebServer(cloud *bambu.Client, onAuth func()) *WebServer {
+func NewWebServer(cloud *bambu.Client, manager *bambu.Manager, onAuth func()) *WebServer {
 	ws := &WebServer{
 		cloud:      cloud,
+		manager:    manager,
 		onAuth:     onAuth,
 		router:     chi.NewRouter(),
 		sseClients: make(map[string]*SSEClient),
 	}
 	ws.setupRoutes()
 	return ws
-}
-
-// SetManager wires the device manager in after authentication.
-func (ws *WebServer) SetManager(m *bambu.Manager) {
-	ws.manager = m
 }
 
 func (ws *WebServer) livenessGrace() time.Duration {
@@ -108,6 +105,7 @@ func (ws *WebServer) setupRoutes() {
 
 func (ws *WebServer) authStatus(w http.ResponseWriter, _ *http.Request) {
 	resp := map[string]any{
+		"cloud_enabled": config.Get().Bambu.CloudEnabled(),
 		"authenticated": ws.cloud.IsAuthenticated(),
 		"email":         ws.cloud.Email(),
 	}
@@ -165,10 +163,6 @@ func (ws *WebServer) authLogout(w http.ResponseWriter, _ *http.Request) {
 // --- devices ---
 
 func (ws *WebServer) getDevices(w http.ResponseWriter, _ *http.Request) {
-	if ws.manager == nil {
-		writeJSON(w, []any{})
-		return
-	}
 	writeJSON(w, ws.manager.GetSummaries())
 }
 
@@ -195,10 +189,6 @@ func (ws *WebServer) refreshDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ws *WebServer) printerFromRequest(w http.ResponseWriter, r *http.Request) *bambu.ManagedPrinter {
-	if ws.manager == nil {
-		writeError(w, http.StatusServiceUnavailable, "not connected")
-		return nil
-	}
 	mp := ws.manager.GetPrinter(chi.URLParam(r, "slug"))
 	if mp == nil {
 		writeError(w, http.StatusNotFound, "printer not found")
@@ -220,16 +210,17 @@ func (ws *WebServer) healthCheck(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (ws *WebServer) connectionStates() map[string]bool {
-	if ws.manager == nil {
-		return map[string]bool{}
-	}
 	return ws.manager.ConnectionStates()
 }
 
+// liveness reports on the cloud connection only. A cloud session that stops
+// working can be repaired by a restart, so it is worth failing the probe for;
+// a LAN printer that is simply powered off is normal and a restart would not
+// bring it back, so LAN printers never make the bridge unhealthy.
 func (ws *WebServer) liveness(w http.ResponseWriter, _ *http.Request) {
+	cloudEnabled := config.Get().Bambu.CloudEnabled()
 	authenticated := ws.cloud.IsAuthenticated()
-	connected := ws.manager != nil && ws.manager.ConnectedCount() > 0
-	healthy := authenticated && connected
+	healthy := !cloudEnabled || (authenticated && ws.manager.ConnectedCountMode(bambu.ModeCloud) > 0)
 
 	now := time.Now()
 	grace := ws.livenessGrace()
@@ -243,6 +234,7 @@ func (ws *WebServer) liveness(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(map[string]any{
 		"healthy":         healthy,
+		"cloudEnabled":    cloudEnabled,
 		"authenticated":   authenticated,
 		"printersOnline":  ws.connectedCount(),
 		"stuckForSeconds": int(stuckFor.Seconds()),
@@ -252,9 +244,6 @@ func (ws *WebServer) liveness(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (ws *WebServer) connectedCount() int {
-	if ws.manager == nil {
-		return 0
-	}
 	return ws.manager.ConnectedCount()
 }
 
@@ -328,25 +317,23 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ws.sseClientsMu.Unlock()
 
 	// Seed the client with current state.
-	if ws.manager != nil {
-		for _, summary := range ws.manager.GetSummaries() {
-			avail := struct {
-				Type   string `json:"type"`
-				Slug   string `json:"slug"`
-				Online bool   `json:"online"`
-			}{Type: "availability", Slug: summary.Slug, Online: summary.Online}
-			if msg, err := json.Marshal(avail); err == nil {
+	for _, summary := range ws.manager.GetSummaries() {
+		avail := struct {
+			Type   string `json:"type"`
+			Slug   string `json:"slug"`
+			Online bool   `json:"online"`
+		}{Type: "availability", Slug: summary.Slug, Online: summary.Online}
+		if msg, err := json.Marshal(avail); err == nil {
+			fmt.Fprintf(w, "data: %s\n\n", string(msg))
+		}
+		if summary.Status != nil {
+			payload := struct {
+				Type string `json:"type"`
+				Slug string `json:"slug"`
+				bambu.PublishedStatus
+			}{Type: "status", Slug: summary.Slug, PublishedStatus: *summary.Status}
+			if msg, err := json.Marshal(payload); err == nil {
 				fmt.Fprintf(w, "data: %s\n\n", string(msg))
-			}
-			if summary.Status != nil {
-				payload := struct {
-					Type string `json:"type"`
-					Slug string `json:"slug"`
-					bambu.PublishedStatus
-				}{Type: "status", Slug: summary.Slug, PublishedStatus: *summary.Status}
-				if msg, err := json.Marshal(payload); err == nil {
-					fmt.Fprintf(w, "data: %s\n\n", string(msg))
-				}
 			}
 		}
 	}

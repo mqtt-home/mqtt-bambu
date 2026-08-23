@@ -3,6 +3,8 @@ import type { DeviceSummary } from '@/types/status';
 export const API_BASE = import.meta.env.DEV ? 'http://localhost:8080/api' : '/api';
 
 export interface AuthStatus {
+  /** False when no Bambu account is configured; the bridge then runs LAN-only. */
+  cloud_enabled: boolean;
   authenticated: boolean;
   email?: string;
   devices?: number;

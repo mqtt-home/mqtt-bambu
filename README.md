@@ -1,10 +1,11 @@
 # mqtt-bambu
 
-A bridge between [Bambu Lab](https://bambulab.com) 3D printers (via the Bambu
-**Cloud** MQTT broker) and your home MQTT broker. It connects to your printers
-through your Bambu account, merges the printer's status reports, and republishes
-a clean, comprehensive status — with a focus on **remaining print durations** —
-to your own broker. A small web UI shows live status and handles the cloud login.
+A bridge between [Bambu Lab](https://bambulab.com) 3D printers and your home MQTT
+broker. It reaches your printers over the Bambu **cloud** broker, directly over
+your **LAN**, or both at once, merges the printer's status reports, and
+republishes a clean, comprehensive status — with a focus on **remaining print
+durations** — to your own broker. A small web UI shows live status and handles
+the cloud login.
 
 Built in the same style as the other `mqtt-*` bridges (`mqtt-huawei`,
 `mqtt-lamarzocco`, `roborock-mqtt`): a Go backend using
@@ -16,6 +17,10 @@ React/Vite web UI, GoReleaser + Docker CI publishing to `pharndt/mqtt-bambu`.
 
 - **Cloud connection** to one or more printers bound to your Bambu account
   (no LAN access code needed; works for printers in cloud/LAN-bound mode).
+- **LAN mode** for printers switched to *LAN Only*, connecting straight to the
+  printer with its access code — no account needed, and it keeps working while
+  the cloud is down. **Cloud and LAN printers can run side by side**, so you can
+  move one printer at a time.
 - **Remaining durations first**: `remaining_minutes`, a human `remaining_text`
   (`"1h 23m"`), and a projected `finish_time` (computed at report time, only
   while actively printing).
@@ -65,7 +70,16 @@ Then open <http://localhost:8080>.
     "email": "${BAMBU_EMAIL}",
     "password": "${BAMBU_PASSWORD}",
     "pushall_interval": 300,
-    "session_file": "/var/lib/mqtt-bambu/.session/session.json"
+    "session_file": "/var/lib/mqtt-bambu/.session/session.json",
+    "lan": [
+      {
+        "name": "H2D",
+        "model": "H2D",
+        "host": "10.0.0.42",
+        "serial": "0123456789ABCDE",
+        "access_code": "12345678"
+      }
+    ]
   },
   "web": {
     "enabled": true,
@@ -79,11 +93,36 @@ Then open <http://localhost:8080>.
 | --- | --- |
 | `mqtt` | Your home broker. `topic` is the base topic; status is published under `<topic>/<printer-slug>/…`. |
 | `bambu.region` | `global` (api.bambulab.com / us.mqtt.bambulab.com) or `china` (api.bambulab.cn / cn.mqtt.bambulab.com). |
-| `bambu.email` / `bambu.password` | Bambu Lab account credentials. `${VAR}` references environment variables. |
+| `bambu.email` / `bambu.password` | Bambu Lab account credentials. `${VAR}` references environment variables. Leave `email` empty to disable the cloud entirely and run LAN-only. |
+| `bambu.lan` | Printers in LAN Only mode (see below). Omit or leave empty for a cloud-only setup. |
 | `bambu.pushall_interval` | Seconds between full-snapshot requests to each printer (default 300). |
 | `bambu.session_file` | Where the cloud token + device list are cached so restarts don't re-authenticate. |
 | `web.enabled` / `web.port` | The status web UI + login flow. |
-| `web.liveness_grace_seconds` | How long the bridge may stay unhealthy before `/api/livez` fails (default 240). |
+| `web.liveness_grace_seconds` | How long the cloud connection may stay broken before `/api/livez` fails (default 240). LAN printers never affect it — a powered-off printer is normal, and a restart would not bring it back. |
+
+### LAN mode
+
+A printer switched to **LAN Only** mode is no longer reachable through the
+cloud, so the bridge connects to the MQTT server the printer itself runs. Each
+entry under `bambu.lan` needs:
+
+| Key | Description |
+| --- | --- |
+| `name` | Display name; also derives the MQTT topic slug. Defaults to the serial. |
+| `host` | The printer's IP address on your network. Give it a DHCP reservation. |
+| `port` | The printer's MQTT port. Defaults to `8883`. |
+| `serial` | The printer's serial number, which forms its MQTT topics. |
+| `access_code` | The 8-character LAN access code. |
+| `model` | Product name shown in the UI, e.g. `"H2D"`. Optional. |
+
+Find the access code and serial on the printer: **Settings → Network → LAN Only
+Mode**. The printer serves a self-signed certificate for its own serial, so the
+bridge connects over TLS without certificate verification.
+
+Cloud and LAN entries can be mixed freely. If a serial appears both in
+`bambu.lan` and on your Bambu account, the LAN connection wins and the cloud
+duplicate is dropped — in LAN mode the cloud broker no longer carries that
+printer's reports.
 
 ### Authentication & the verification code
 
@@ -153,10 +192,20 @@ The Go module lives in `app/`; the web UI in `app/web/`.
 
 ## How it works
 
-Bambu printers publish status to the cloud MQTT broker on
-`device/<serial>/report`. The bridge subscribes there using the account's MQTT
-username (`u_<uid>`, derived from the access-token JWT) and the access token as
-the password. Reports are **partial deltas**, so the bridge merges them into a
-cached state object and periodically publishes a `pushall` request to force a
-full snapshot. The merged state is derived into the comprehensive status above
-and published to your home broker.
+Bambu printers publish status on `device/<serial>/report`, and accept commands
+on `device/<serial>/request`. Only the broker and its credentials differ between
+the two modes:
+
+| | Broker | Username | Password |
+| --- | --- | --- | --- |
+| Cloud | `us.mqtt.bambulab.com:8883` | `u_<uid>`, derived from the access-token JWT | the account access token |
+| LAN | `<printer-ip>:8883` | `bblp` | the printer's LAN access code |
+
+Reports are **partial deltas**, so the bridge merges them into a cached state
+object and periodically publishes a `pushall` request to force a full snapshot.
+The merged state is derived into the comprehensive status above and published to
+your home broker.
+
+LAN printers connect at startup and are independent of the cloud: they keep
+publishing while the account session is expired, being re-authenticated, or not
+configured at all.

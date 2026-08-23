@@ -25,8 +25,8 @@ var (
 	manager   *bambu.Manager
 	webServer *web.WebServer
 
-	bridgeOnce sync.Once
-	stopPush   chan struct{}
+	cloudOnce sync.Once
+	stopPush  chan struct{}
 )
 
 func main() {
@@ -52,11 +52,15 @@ func main() {
 	// Start the home MQTT broker connection first (status sink).
 	mqtt.Start(cfg.MQTT, "bambu_mqtt")
 
+	manager = bambu.NewManager()
+	manager.SetStatusListener(publishStatus)
+	manager.SetAvailabilityListener(publishAvailability)
+
 	cloud = bambu.NewClient(cfg.Bambu.Region, cfg.Bambu.Email, cfg.Bambu.Password, cfg.Bambu.SessionFile)
 
 	// Start the web server early so the login UI is reachable before auth.
 	if cfg.Web.Enabled {
-		webServer = web.NewWebServer(cloud, startBridge)
+		webServer = web.NewWebServer(cloud, manager, startCloudBridge)
 		go func() {
 			if err := webServer.Start(cfg.Web.Port); err != nil {
 				logger.Error("Failed to start web server", "error", err)
@@ -67,28 +71,60 @@ func main() {
 		logger.Info("Web interface is disabled in the configuration")
 	}
 
+	// LAN printers need no authentication, so they connect straight away and
+	// keep working regardless of the cloud's state.
+	startLANBridge(cfg.Bambu.LAN)
+
 	// Authenticate: reuse a persisted session, else log in with the configured
 	// credentials. When a verification code is required, the web UI completes it.
-	authenticate()
+	if cfg.Bambu.CloudEnabled() {
+		authenticate()
+	} else {
+		logger.Info("Bambu cloud disabled (no email configured), running LAN-only")
+	}
+
+	// Reports are partial deltas, so periodically request a full snapshot. The
+	// loop covers cloud printers too once they join.
+	stopPush = make(chan struct{})
+	go pushAllLoop(time.Duration(cfg.Bambu.PushAllInterval)*time.Second, stopPush)
 
 	quitChannel := make(chan os.Signal, 1)
 	signal.Notify(quitChannel, syscall.SIGINT, syscall.SIGTERM)
 	<-quitChannel
 
 	logger.Info("Received quit signal")
-	if stopPush != nil {
-		close(stopPush)
+	close(stopPush)
+	manager.DisconnectAll()
+}
+
+// startLANBridge connects the printers configured for LAN mode.
+func startLANBridge(printers []config.LANPrinter) {
+	if len(printers) == 0 {
+		return
 	}
-	if manager != nil {
-		manager.DisconnectAll()
+
+	lan := make([]bambu.LANPrinter, 0, len(printers))
+	for _, p := range printers {
+		lan = append(lan, bambu.LANPrinter{
+			Name:       p.Name,
+			Model:      p.Model,
+			Serial:     p.Serial,
+			Host:       p.Host,
+			Port:       p.Port,
+			AccessCode: p.AccessCode,
+		})
 	}
+
+	added := manager.AddLANPrinters(lan)
+	connectPrinters(added)
+	logger.Info("LAN printers started", "printers", len(added))
 }
 
 // authenticate tries a cached session, then a direct login. If the account needs
 // an emailed code or TOTP, it logs that and leaves the web login flow to finish.
 func authenticate() {
 	if cloud.LoadSession() {
-		startBridge()
+		startCloudBridge()
 		return
 	}
 
@@ -102,7 +138,7 @@ func authenticate() {
 		if serr := cloud.SaveSession(); serr != nil {
 			logger.Warn("Failed to save session", "error", serr)
 		}
-		startBridge()
+		startCloudBridge()
 	case errors.Is(err, bambu.ErrVerificationRequired):
 		logger.Warn("Email verification code required — complete login via the web UI", "url", webURL())
 	case errors.Is(err, bambu.ErrTFARequired):
@@ -112,38 +148,29 @@ func authenticate() {
 	}
 }
 
-// startBridge connects to the printers and begins publishing. It is safe to call
-// from both the startup path and the web login callback; it runs once.
-func startBridge() {
-	bridgeOnce.Do(func() {
-		cfg := config.Get()
+// startCloudBridge adds the account's printers to the manager and connects them.
+// It is safe to call from both the startup path and the web login callback; it
+// runs once.
+func startCloudBridge() {
+	cloudOnce.Do(func() {
 		devices := cloud.Devices()
 		if len(devices) == 0 {
 			logger.Warn("No Bambu devices bound to this account")
 		}
 
-		manager = bambu.NewManager(devices, cloud.MQTTHost(), cloud.MQTTUsername(), cloud.AccessToken())
-		manager.SetStatusListener(publishStatus)
-		manager.SetAvailabilityListener(publishAvailability)
-
-		if webServer != nil {
-			webServer.SetManager(manager)
-		}
-
-		// Seed availability as offline until each printer connects.
-		for slug := range manager.ConnectionStates() {
-			publishAvailability(slug, false)
-		}
-
-		manager.ConnectAll()
-
-		// Periodically request a full snapshot, since reports are partial deltas.
-		stopPush = make(chan struct{})
-		interval := time.Duration(cfg.Bambu.PushAllInterval) * time.Second
-		go pushAllLoop(interval, stopPush)
-
-		logger.Info("Bridge started", "printers", len(devices))
+		added := manager.AddCloudDevices(devices, cloud.MQTTHost(), cloud.MQTTUsername(), cloud.AccessToken())
+		connectPrinters(added)
+		logger.Info("Cloud printers started", "printers", len(added))
 	})
+}
+
+// connectPrinters seeds availability as offline, then opens each session so the
+// home broker never shows a printer as online before it actually is.
+func connectPrinters(printers []*bambu.ManagedPrinter) {
+	for _, mp := range printers {
+		publishAvailability(mp.Slug, false)
+	}
+	bambu.Connect(printers)
 }
 
 func pushAllLoop(interval time.Duration, stop <-chan struct{}) {
@@ -152,9 +179,7 @@ func pushAllLoop(interval time.Duration, stop <-chan struct{}) {
 	for {
 		select {
 		case <-ticker.C:
-			if manager != nil {
-				manager.PushAll()
-			}
+			manager.PushAll()
 		case <-stop:
 			return
 		}

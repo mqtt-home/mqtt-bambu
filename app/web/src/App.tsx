@@ -26,11 +26,12 @@ export function App() {
     try {
       const status = await getAuthStatus();
       setAuth(status);
-      if (status.authenticated) {
+      // LAN printers are bridged without an account, so always load devices.
+      if (status.authenticated || !status.cloud_enabled) {
         await loadDevices();
       }
     } catch {
-      setAuth({ authenticated: false });
+      setAuth({ cloud_enabled: true, authenticated: false });
     } finally {
       setLoading(false);
     }
@@ -42,7 +43,7 @@ export function App() {
 
   const handleLogout = async () => {
     await logout();
-    setAuth({ authenticated: false });
+    setAuth({ cloud_enabled: true, authenticated: false });
     setDevices([]);
   };
 
@@ -54,7 +55,8 @@ export function App() {
     );
   }
 
-  if (!auth?.authenticated) {
+  // Only the cloud needs a login; a LAN-only bridge goes straight to the status.
+  if (auth?.cloud_enabled !== false && !auth?.authenticated) {
     return <LoginPage email={auth?.email} onSuccess={refreshAuth} />;
   }
 
@@ -77,9 +79,11 @@ export function App() {
             <button onClick={toggleTheme} className="p-2 rounded-md hover:bg-accent transition-colors touch-target" title="Toggle theme">
               {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
-            <button onClick={handleLogout} className="p-2 rounded-md hover:bg-accent transition-colors touch-target" title="Log out">
-              <LogOut className="h-4 w-4" />
-            </button>
+            {auth?.cloud_enabled && (
+              <button onClick={handleLogout} className="p-2 rounded-md hover:bg-accent transition-colors touch-target" title="Log out">
+                <LogOut className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -87,7 +91,7 @@ export function App() {
       <main className="max-w-5xl mx-auto px-4 py-6">
         {devices.length === 0 ? (
           <p className="text-center text-muted-foreground py-16">
-            No printers found on this account.
+            No printers configured.
           </p>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2">
@@ -97,6 +101,7 @@ export function App() {
                 slug={d.slug}
                 name={d.name}
                 model={d.model}
+                mode={d.mode}
                 online={availabilities[d.slug] ?? d.online}
                 status={statuses[d.slug] ?? d.status}
               />

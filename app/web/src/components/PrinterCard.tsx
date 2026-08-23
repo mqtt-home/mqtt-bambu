@@ -1,5 +1,5 @@
 import { Clock, Layers, Thermometer, Gauge, RefreshCw, Wifi, WifiOff, CheckCircle2, AlertTriangle, Printer } from 'lucide-react';
-import type { PrinterStatus } from '@/types/status';
+import type { ConnectionMode, PrinterStatus } from '@/types/status';
 import { stateLabel, formatFinishTime } from '@/types/status';
 import { refreshDevice } from '@/lib/api';
 
@@ -7,6 +7,7 @@ interface PrinterCardProps {
   slug: string;
   name: string;
   model: string;
+  mode: ConnectionMode;
   online: boolean;
   status: PrinterStatus | null;
 }
@@ -18,7 +19,7 @@ const STATE_COLOR: Record<string, string> = {
   failed: 'hsl(0 84% 60%)',
 };
 
-export function PrinterCard({ slug, name, model, online, status }: PrinterCardProps) {
+export function PrinterCard({ slug, name, model, mode, online, status }: PrinterCardProps) {
   const accent = (status && STATE_COLOR[status.state]) || 'var(--color-muted-foreground)';
 
   return (
@@ -29,7 +30,11 @@ export function PrinterCard({ slug, name, model, online, status }: PrinterCardPr
           <Printer className="h-5 w-5 shrink-0" style={{ color: accent }} />
           <div className="min-w-0">
             <h2 className="font-semibold truncate">{name}</h2>
-            <p className="text-xs text-muted-foreground truncate">{model}</p>
+            <p className="text-xs text-muted-foreground truncate">
+              {model}
+              {model && ' · '}
+              <span className="uppercase tracking-wide">{mode}</span>
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">

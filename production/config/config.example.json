@@ -10,7 +10,16 @@
     "email": "${BAMBU_EMAIL}",
     "password": "${BAMBU_PASSWORD}",
     "pushall_interval": 300,
-    "session_file": "/var/lib/mqtt-bambu/.session/session.json"
+    "session_file": "/var/lib/mqtt-bambu/.session/session.json",
+    "lan": [
+      {
+        "name": "H2D",
+        "model": "H2D",
+        "host": "10.0.0.42",
+        "serial": "${BAMBU_H2D_SERIAL}",
+        "access_code": "${BAMBU_H2D_ACCESS_CODE}"
+      }
+    ]
   },
   "web": {
     "enabled": true,

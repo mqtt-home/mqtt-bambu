@@ -3,6 +3,8 @@ package bambu
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,20 +16,49 @@ import (
 // snapshot on its report topic. Reports are otherwise partial deltas.
 const pushAllCommand = `{"pushing":{"sequence_id":"0","command":"pushall","version":1,"push_target":1}}`
 
+// lanUsername is the fixed MQTT username a printer in LAN mode expects; the
+// password is the LAN access code from the printer's display.
+const lanUsername = "bblp"
+
+// ConnectionMode is how a printer is reached: through the Bambu cloud broker,
+// or directly over the local network when the printer runs in LAN mode.
+type ConnectionMode string
+
+const (
+	ModeCloud ConnectionMode = "cloud"
+	ModeLAN   ConnectionMode = "lan"
+)
+
+// endpoint holds the MQTT broker coordinates and credentials for one printer.
+// Cloud and LAN differ only here — the report/request topics and the payloads
+// on them are identical.
+type endpoint struct {
+	mode     ConnectionMode
+	host     string
+	port     int
+	username string
+	password string
+	// insecureTLS skips certificate verification. Printers in LAN mode serve a
+	// self-signed certificate for their own IP, so verification cannot succeed.
+	insecureTLS bool
+}
+
+func (e endpoint) address() string {
+	return "ssl://" + net.JoinHostPort(e.host, strconv.Itoa(e.port))
+}
+
 // StatusListener is invoked with a freshly derived status whenever a report
 // arrives for a printer.
 type StatusListener func(serial string, status PublishedStatus)
 
-// AvailabilityListener is invoked when a printer's cloud connection state
-// changes.
+// AvailabilityListener is invoked when a printer's connection state changes.
 type AvailabilityListener func(serial string, online bool)
 
-// PrinterClient maintains the cloud MQTT connection for a single printer.
+// PrinterClient maintains the MQTT connection for a single printer, over either
+// the cloud broker or the printer's own LAN broker.
 type PrinterClient struct {
 	device   Device
-	host     string
-	username string
-	password string
+	endpoint endpoint
 
 	client paho.Client
 	cache  *stateCache
@@ -40,12 +71,35 @@ type PrinterClient struct {
 	last   *PublishedStatus
 }
 
-func NewPrinterClient(device Device, host, username, password string) *PrinterClient {
-	return &PrinterClient{
-		device:   device,
+// NewCloudPrinterClient reaches the printer through the Bambu cloud broker,
+// using the account's MQTT username and access token.
+func NewCloudPrinterClient(device Device, host, username, password string) *PrinterClient {
+	return newPrinterClient(device, endpoint{
+		mode:     ModeCloud,
 		host:     host,
+		port:     8883,
 		username: username,
 		password: password,
+	})
+}
+
+// NewLANPrinterClient reaches the printer directly on the local network, using
+// the LAN access code as the password.
+func NewLANPrinterClient(device Device, host string, port int, accessCode string) *PrinterClient {
+	return newPrinterClient(device, endpoint{
+		mode:        ModeLAN,
+		host:        host,
+		port:        port,
+		username:    lanUsername,
+		password:    accessCode,
+		insecureTLS: true,
+	})
+}
+
+func newPrinterClient(device Device, ep endpoint) *PrinterClient {
+	return &PrinterClient{
+		device:   device,
+		endpoint: ep,
 		cache:    newStateCache(),
 	}
 }
@@ -53,8 +107,9 @@ func NewPrinterClient(device Device, host, username, password string) *PrinterCl
 func (p *PrinterClient) SetStatusListener(l StatusListener)             { p.onStatus = l }
 func (p *PrinterClient) SetAvailabilityListener(l AvailabilityListener) { p.onAvailability = l }
 
-func (p *PrinterClient) Serial() string { return p.device.DevID }
-func (p *PrinterClient) Device() Device { return p.device }
+func (p *PrinterClient) Serial() string       { return p.device.DevID }
+func (p *PrinterClient) Device() Device       { return p.device }
+func (p *PrinterClient) Mode() ConnectionMode { return p.endpoint.mode }
 
 func (p *PrinterClient) IsOnline() bool {
 	p.mu.RLock()
@@ -71,14 +126,17 @@ func (p *PrinterClient) LastStatus() *PublishedStatus {
 func (p *PrinterClient) reportTopic() string  { return "device/" + p.device.DevID + "/report" }
 func (p *PrinterClient) requestTopic() string { return "device/" + p.device.DevID + "/request" }
 
-// Connect establishes the cloud MQTT session and subscribes to the report topic.
+// Connect establishes the MQTT session and subscribes to the report topic.
 func (p *PrinterClient) Connect() error {
 	opts := paho.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("ssl://%s:8883", p.host))
+	opts.AddBroker(p.endpoint.address())
 	opts.SetClientID(fmt.Sprintf("mqtt-bambu-%s-%d", shortSerial(p.device.DevID), time.Now().UnixNano()))
-	opts.SetUsername(p.username)
-	opts.SetPassword(p.password)
-	opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
+	opts.SetUsername(p.endpoint.username)
+	opts.SetPassword(p.endpoint.password)
+	opts.SetTLSConfig(&tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: p.endpoint.insecureTLS,
+	})
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(10 * time.Second)
@@ -92,13 +150,14 @@ func (p *PrinterClient) Connect() error {
 	p.client = paho.NewClient(opts)
 	token := p.client.Connect()
 	if !token.WaitTimeout(20 * time.Second) {
-		return fmt.Errorf("timed out connecting to Bambu cloud MQTT for %s", p.device.Name)
+		return fmt.Errorf("timed out connecting to %s MQTT (%s) for %s", p.endpoint.mode, p.endpoint.host, p.device.Name)
 	}
 	return token.Error()
 }
 
 func (p *PrinterClient) onConnect(c paho.Client) {
-	logger.Info("Connected to Bambu cloud MQTT", "printer", p.device.Name, "serial", p.device.DevID)
+	logger.Info("Connected to Bambu MQTT", "printer", p.device.Name, "serial", p.device.DevID,
+		"mode", p.endpoint.mode, "host", p.endpoint.host)
 	p.setOnline(true)
 
 	token := c.Subscribe(p.reportTopic(), 0, p.handleMessage)
@@ -111,7 +170,7 @@ func (p *PrinterClient) onConnect(c paho.Client) {
 }
 
 func (p *PrinterClient) onConnectionLost(_ paho.Client, err error) {
-	logger.Warn("Lost Bambu cloud MQTT connection", "printer", p.device.Name, "error", err)
+	logger.Warn("Lost Bambu MQTT connection", "printer", p.device.Name, "mode", p.endpoint.mode, "error", err)
 	p.setOnline(false)
 }
 
@@ -142,7 +201,7 @@ func (p *PrinterClient) PushAll() {
 	}
 }
 
-// Disconnect tears down the cloud MQTT session.
+// Disconnect tears down the MQTT session.
 func (p *PrinterClient) Disconnect() {
 	if p.client != nil && p.client.IsConnected() {
 		p.client.Disconnect(250)

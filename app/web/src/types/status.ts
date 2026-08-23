@@ -49,11 +49,14 @@ export interface PrinterStatus {
   updated_at: string;
 }
 
+export type ConnectionMode = 'cloud' | 'lan';
+
 export interface DeviceSummary {
   slug: string;
   name: string;
   model: string;
   serial: string;
+  mode: ConnectionMode;
   online: boolean;
   status: PrinterStatus | null;
 }
