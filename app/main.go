@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -94,6 +95,7 @@ func main() {
 
 	logger.Info("Received quit signal")
 	close(stopPush)
+	shuttingDown.Store(true)
 	manager.DisconnectAll()
 }
 
@@ -203,7 +205,19 @@ func publishStatus(slug string, status bambu.PublishedStatus) {
 	}
 }
 
+// shuttingDown is set once the process got its termination signal.
+var shuttingDown atomic.Bool
+
 func publishAvailability(slug string, online bool) {
+	// A bridge that is shutting down must not speak for its printers. In a
+	// rolling update the replacement pod has already announced "online", and
+	// the "offline" that DisconnectAll triggers would land on top of it and
+	// stay until the next restart. bridge/state says whether the bridge is gone.
+	if shuttingDown.Load() && !online {
+		logger.Debug("Shutting down, not publishing availability", "printer", slug)
+		return
+	}
+
 	cfg := config.Get()
 	topic := cfg.MQTT.Topic + "/" + slug + "/availability"
 	payload := "offline"
