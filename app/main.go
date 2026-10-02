@@ -126,8 +126,21 @@ func startLANBridge(printers []config.LANPrinter) {
 // an emailed code or TOTP, it logs that and leaves the web login flow to finish.
 func authenticate() {
 	if cloud.LoadSession() {
-		startCloudBridge()
-		return
+		// An opaque token cannot be checked offline. Ask the cloud: a rejected
+		// token would otherwise be reloaded on every restart while the printer
+		// connections fail forever.
+		err := cloud.DiscoverDevices()
+		if !errors.Is(err, bambu.ErrUnauthorized) {
+			if err != nil {
+				logger.Warn("Could not verify the persisted Bambu session, using it as is", "error", err)
+			} else if serr := cloud.SaveSession(); serr != nil {
+				logger.Warn("Failed to save session", "error", serr)
+			}
+			startCloudBridge()
+			return
+		}
+		logger.Warn("Bambu cloud rejected the persisted session, logging in again", "error", err)
+		cloud.ClearSession()
 	}
 
 	err := cloud.Login()

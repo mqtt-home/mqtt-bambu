@@ -20,6 +20,8 @@ import (
 var (
 	// ErrVerificationRequired means the account requires an emailed login code.
 	ErrVerificationRequired = errors.New("email verification code required")
+	// ErrUnauthorized means the cloud rejected the access token (HTTP 401).
+	ErrUnauthorized = errors.New("access token rejected")
 	// ErrTFARequired means the account has TOTP two-factor enabled.
 	ErrTFARequired = errors.New("two-factor authentication code required")
 )
@@ -61,6 +63,11 @@ type Client struct {
 	sess   session
 	tfaKey string
 	authed bool
+	// awaitingCode is set while login waits for a code from the web UI.
+	awaitingCode bool
+
+	// apiBaseURL overrides the regional API base (tests).
+	apiBaseURL string
 }
 
 func NewClient(region, email, password, sessionFile string) *Client {
@@ -74,6 +81,9 @@ func NewClient(region, email, password, sessionFile string) *Client {
 }
 
 func (c *Client) apiBase() string {
+	if c.apiBaseURL != "" {
+		return c.apiBaseURL
+	}
 	if c.region == "china" {
 		return apiBaseChina
 	}
@@ -94,6 +104,20 @@ func (c *Client) IsAuthenticated() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.authed
+}
+
+// AwaitingCode reports whether login is waiting for an emailed or TOTP code to
+// be entered in the web UI. A restart cannot supply that code.
+func (c *Client) AwaitingCode() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.awaitingCode
+}
+
+func (c *Client) setAwaitingCode() {
+	c.mu.Lock()
+	c.awaitingCode = true
+	c.mu.Unlock()
 }
 
 func (c *Client) AccessToken() string {
@@ -142,6 +166,7 @@ func (c *Client) Login() error {
 		if err := c.RequestCode(); err != nil {
 			return err
 		}
+		c.setAwaitingCode()
 		return ErrVerificationRequired
 	}
 
@@ -155,10 +180,12 @@ func (c *Client) Login() error {
 		if err := c.RequestCode(); err != nil {
 			return err
 		}
+		c.setAwaitingCode()
 		return ErrVerificationRequired
 	case "tfa":
 		c.mu.Lock()
 		c.tfaKey = resp.TFAKey
+		c.awaitingCode = true
 		c.mu.Unlock()
 		return ErrTFARequired
 	}
@@ -217,6 +244,7 @@ func (c *Client) storeToken(accessToken, refreshToken string) error {
 	c.sess.MQTTUsername = username
 	c.authed = true
 	c.tfaKey = ""
+	c.awaitingCode = false
 	c.mu.Unlock()
 
 	logger.Info("Bambu cloud authenticated", "user", username)
@@ -288,8 +316,8 @@ func (c *Client) LoadSession() bool {
 		return false
 	}
 	// JWT tokens carry an expiry we can check up front; opaque tokens cannot be
-	// validated offline, so accept them and rely on a runtime failure (and the
-	// liveness probe) to trigger re-authentication.
+	// validated offline, so accept them here. The caller confirms the session
+	// against the cloud (DiscoverDevices) before relying on it.
 	if claims, err := parseJWTClaims(s.AccessToken); err == nil {
 		if claims.Exp > 0 && time.Now().After(time.Unix(claims.Exp, 0)) {
 			logger.Info("Persisted Bambu session expired, re-authenticating")
@@ -374,6 +402,9 @@ func (c *Client) do(req *http.Request, auth bool, out any) error {
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode == http.StatusUnauthorized && auth {
+		return fmt.Errorf("http %d: %s: %w", resp.StatusCode, truncate(string(data), 200), ErrUnauthorized)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("http %d: %s", resp.StatusCode, truncate(string(data), 200))

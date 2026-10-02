@@ -220,7 +220,10 @@ func (ws *WebServer) connectionStates() map[string]bool {
 func (ws *WebServer) liveness(w http.ResponseWriter, _ *http.Request) {
 	cloudEnabled := config.Get().Bambu.CloudEnabled()
 	authenticated := ws.cloud.IsAuthenticated()
-	healthy := !cloudEnabled || (authenticated && ws.manager.ConnectedCountMode(bambu.ModeCloud) > 0)
+	awaitingCode := ws.cloud.AwaitingCode()
+	// Waiting for a login code is not repaired by a restart either: it would
+	// only request (and email) a fresh code every few minutes.
+	healthy := !cloudEnabled || awaitingCode || (authenticated && ws.manager.ConnectedCountMode(bambu.ModeCloud) > 0)
 
 	now := time.Now()
 	grace := ws.livenessGrace()
@@ -236,6 +239,7 @@ func (ws *WebServer) liveness(w http.ResponseWriter, _ *http.Request) {
 		"healthy":         healthy,
 		"cloudEnabled":    cloudEnabled,
 		"authenticated":   authenticated,
+		"awaitingCode":    awaitingCode,
 		"printersOnline":  ws.connectedCount(),
 		"stuckForSeconds": int(stuckFor.Seconds()),
 		"graceSeconds":    int(grace.Seconds()),
