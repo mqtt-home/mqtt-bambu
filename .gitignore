@@ -15,3 +15,8 @@ dist/
 
 node_modules/
 app/build
+
+# build artefacts of tsc -b
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js

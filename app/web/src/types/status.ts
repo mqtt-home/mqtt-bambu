@@ -73,27 +73,3 @@ export interface AvailabilitySSEEvent {
 }
 
 export type SSEEvent = StatusSSEEvent | AvailabilitySSEEvent;
-
-const STATE_LABELS: Record<string, string> = {
-  idle: 'Idle',
-  prepare: 'Preparing',
-  slicing: 'Slicing',
-  printing: 'Printing',
-  paused: 'Paused',
-  finished: 'Finished',
-  failed: 'Failed',
-};
-
-export function stateLabel(state: string): string {
-  return STATE_LABELS[state] ?? state;
-}
-
-export function formatFinishTime(iso?: string): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return sameDay ? time : `${d.toLocaleDateString([], { weekday: 'short' })} ${time}`;
-}
