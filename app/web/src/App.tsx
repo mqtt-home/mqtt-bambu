@@ -2,13 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 import { Loader2, LogOut, Printer, RefreshCw } from 'lucide-react'
 import { useSSE } from './hooks/useSSE'
 import { getAuthStatus, fetchDevices, logout, type AuthStatus } from './lib/api'
-import { LANGS, useI18n } from './lib/i18n'
+import { LangSwitch, useI18n } from './lib/i18n'
 import type { DeviceSummary } from './types/status'
 import { PrinterCard } from './components/PrinterCard'
 import { LoginPage } from './components/LoginPage'
 
 export function App() {
-  const { t } = useI18n()
+  const i = useI18n()
+  const { t } = i
   const [auth, setAuth] = useState<AuthStatus | null>(null)
   const [devices, setDevices] = useState<DeviceSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -81,7 +82,7 @@ export function App() {
               </div>
             </div>
           </div>
-          <LangSwitch />
+          <LangSwitch i18n={i} />
           <div className="flex">
             <button onClick={loadDevices} className="icon-btn" title={t('reload')} aria-label={t('reload')}>
               <RefreshCw className="size-[18px]" />
@@ -116,19 +117,6 @@ export function App() {
           </div>
         )}
       </main>
-    </div>
-  )
-}
-
-function LangSwitch() {
-  const i = useI18n()
-  return (
-    <div className="seg" role="group" aria-label={i.t('language')}>
-      {LANGS.map((l) => (
-        <button key={l} aria-pressed={i.lang === l} onClick={() => i.setLang(l)}>
-          {l.toUpperCase()}
-        </button>
-      ))}
     </div>
   )
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { KeyRound, Loader2, Mail, Printer } from 'lucide-react'
 import { loginWithCode, requestCode } from '@/lib/api'
-import { LANGS, useI18n } from '@/lib/i18n'
+import { LangSwitch, useI18n } from '@/lib/i18n'
 
 interface LoginPageProps {
   email?: string
@@ -89,13 +89,7 @@ export function LoginPage({ email, onSuccess }: LoginPageProps) {
           )}
         </div>
       </div>
-      <div className="seg" role="group" aria-label={i.t('language')}>
-        {LANGS.map((l) => (
-          <button key={l} aria-pressed={i.lang === l} onClick={() => i.setLang(l)}>
-            {l.toUpperCase()}
-          </button>
-        ))}
-      </div>
+      <LangSwitch i18n={i} />
     </div>
   )
 }
